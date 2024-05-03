@@ -105,29 +105,18 @@ pub fn scan_gitlab(query: Option<String>, token: &str) -> Result<(), ErdError> {
     Ok(())
 }
 
-pub fn get_latest_artifact_gitlab(artifact: &ArtifactConfig, token: &str) -> Result<(), ErdError> {
+pub fn get_artifact_gitlab(
+    artifact: &ArtifactConfig,
+    token: &str,
+    build_id: Option<String>,
+) -> Result<(), ErdError> {
     let output_dir = Path::new("temp");
 
-    let url = format!(
-        "https://gitlab.com/api/v4/projects/{}/jobs/artifacts/{}/download?job=build",
-        artifact.project_id, artifact.branch
-    );
-    let client = reqwest::blocking::Client::new();
-    let token_value = get_token_value(token)?;
-    let mut response = client
-        .get(&url)
-        .header(TOKEN_HEADER, token_value)
-        .send()
-        .map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.clone(),
-            desc: format!("Failed to get artifact from Gitlab: {}", e),
-        })?;
-    let mut buffer = vec![];
-    let bytes_read = response
-        .read_to_end(&mut buffer)
-        .map_err(|e| ErdError::IOError(e, "Failed to read data from artifact zip".to_string()))?;
-    println!("{} bytes read", bytes_read);
+    let buffer = match build_id {
+        Some(b_id) => get_artifact_version_gitlab(artifact, token, &b_id)?,
+        None => get_latest_artifact_gitlab(artifact, token)?,
+    };
+
     let mut file = File::create(output_dir.join("artifacts.zip"))
         .map_err(|e| ErdError::IOError(e, "Failed to create artifacts.zip file".to_string()))?;
     file.write_all(&buffer)
@@ -158,6 +147,59 @@ pub fn get_latest_artifact_gitlab(artifact: &ArtifactConfig, token: &str) -> Res
     Ok(())
 }
 
+fn get_latest_artifact_gitlab(artifact: &ArtifactConfig, token: &str) -> Result<Vec<u8>, ErdError> {
+    let url = format!(
+        "https://gitlab.com/api/v4/projects/{}/jobs/artifacts/{}/download?job=build",
+        artifact.project_id, artifact.branch
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let token_value = get_token_value(token)?;
+    let mut response = client
+        .get(&url)
+        .header(TOKEN_HEADER, token_value)
+        .send()
+        .map_err(|e| ErdError::SourceRequestError {
+            source: SourceType::Gitlab,
+            url: url.clone(),
+            desc: format!("Failed to get artifact from Gitlab: {}", e),
+        })?;
+    let mut buffer = vec![];
+    let bytes_read = response
+        .read_to_end(&mut buffer)
+        .map_err(|e| ErdError::IOError(e, "Failed to read data from artifact zip".to_string()))?;
+    println!("{} bytes read", bytes_read);
+    Ok(buffer)
+}
+
+pub fn get_artifact_version_gitlab(
+    artifact: &ArtifactConfig,
+    token: &str,
+    build_id: &str,
+) -> Result<Vec<u8>, ErdError> {
+    let url = format!(
+        "https://gitlab.com/api/v4/projects/{}/jobs/{}/artifacts",
+        artifact.project_id, build_id
+    );
+    let client = reqwest::blocking::Client::new();
+    let token_value = get_token_value(token)?;
+    let mut response = client
+        .get(&url)
+        .header(TOKEN_HEADER, token_value)
+        .send()
+        .map_err(|e| ErdError::SourceRequestError {
+            source: SourceType::Gitlab,
+            url: url.clone(),
+            desc: format!("Failed to get artifact from Gitlab: {}", e),
+        })?;
+    let mut buffer = vec![];
+    let bytes_read = response
+        .read_to_end(&mut buffer)
+        .map_err(|e| ErdError::IOError(e, "Failed to read data from artifact zip".to_string()))?;
+    println!("{} bytes read", bytes_read);
+    Ok(buffer)
+}
+
 pub fn get_history_gitlab(
     artifact: &ArtifactConfig,
     token: &str,
@@ -176,6 +218,7 @@ pub fn get_history_gitlab(
             ("order_by", "updated_at"),
             ("ref", &artifact.branch),
             ("name", job_name),
+            ("per_page", "5"),
         ])
         .header(TOKEN_HEADER, token_value)
         .send()

@@ -9,7 +9,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use config::{ArtifactConfig, SourceConfig, SourceType};
-use gitlab::{get_history_gitlab, get_latest_artifact_gitlab, scan_gitlab};
+use gitlab::{get_artifact_gitlab, get_history_gitlab, scan_gitlab};
 use zip::ZipArchive;
 
 use crate::config::Config;
@@ -56,25 +56,40 @@ fn main() {
 
 fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
     match cli.command {
-        Commands::Fetch { artifact } => {
-            let mut found = false;
-            for source in &config.sources {
-                for art in &source.artifacts {
-                    if artifact.is_none() || artifact.as_ref().unwrap() == &art.id {
-                        println!("Retrieving {} from {}", art.id, source.id);
-                        get_latest_artifact(art, &source.kind, &source.token)?;
-                        found = true;
+        Commands::Fetch { artifact, build_id } => {
+            match artifact {
+                Some(art) => {
+                    // Fetch specific artifact
+                    let (source, artifact) = config
+                        .sources
+                        .iter()
+                        .find_map(|s| s.artifacts.iter().find(|a| a.id == art).map(|a| (s, a)))
+                        .ok_or(ErdError::NoSuchArtifact(art))?;
+                    get_artifact(artifact, &source.kind, &source.token, build_id)?;
+                }
+                None => {
+                    // Fetch all artifacts
+
+                    let mut found = false;
+                    for source in &config.sources {
+                        for art in &source.artifacts {
+                            if artifact.is_none() || artifact.as_ref().unwrap() == &art.id {
+                                println!("Retrieving {} from {}", art.id, source.id);
+                                get_artifact(art, &source.kind, &source.token, None)?;
+                                found = true;
+                            }
+                        }
+                    }
+                    if !found {
+                        eprintln!("No artifacts to retrieve");
                     }
                 }
             }
-            if !found {
-                match artifact {
-                    Some(id) => return Err(ErdError::NoSuchArtifact(id.to_string())),
-                    None => eprintln!("No artifacts to retrieve"),
-                }
-            }
         }
-        Commands::Scan { source, group } => {
+        Commands::Scan {
+            source,
+            search: group,
+        } => {
             let matched_src = config
                 .sources
                 .iter()
@@ -102,11 +117,17 @@ fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Retrieve the given artifact
-    Fetch { artifact: Option<String> },
+    Fetch {
+        /// The id of the artifact to fetch
+        artifact: Option<String>,
+        /// The specific version id of the artifact
+        build_id: Option<String>,
+    },
     /// Scan for projects to add to configuration
     Scan {
+        /// The source to scan
         source: String,
-        group: Option<String>,
+        search: Option<String>,
     },
     /// View the job history
     History {
@@ -132,13 +153,14 @@ fn scan_source(source: &SourceConfig, group: Option<String>) -> Result<(), ErdEr
     }
 }
 
-fn get_latest_artifact(
+fn get_artifact(
     artifact: &ArtifactConfig,
     kind: &SourceType,
     token: &str,
+    build_id: Option<String>,
 ) -> Result<(), ErdError> {
     match kind {
-        SourceType::Gitlab => get_latest_artifact_gitlab(artifact, token),
+        SourceType::Gitlab => get_artifact_gitlab(artifact, token, build_id),
     }
 }
 
