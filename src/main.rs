@@ -1,7 +1,11 @@
 mod config;
 mod gitlab;
 
-use std::io::{self, Read, Seek};
+use std::{
+    fmt::Display,
+    io::{self, Read, Seek},
+    process::exit,
+};
 
 use clap::{Parser, Subcommand};
 use config::{ArtifactConfig, SourceConfig, SourceType};
@@ -10,6 +14,33 @@ use zip::ZipArchive;
 
 use crate::config::Config;
 
+#[derive(Debug)]
+pub enum ErdError {
+    NoSuchArtifact(String),
+    NoSuchSource(String),
+    SourceRequestError {
+        source: SourceType,
+        url: String,
+        desc: String,
+    },
+    InvalidToken(String),
+    IOError(io::Error, String),
+}
+
+impl Display for ErdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErdError::NoSuchArtifact(artifact) => write!(f, "No such artifact: '{}'", artifact),
+            ErdError::NoSuchSource(source) => write!(f, "No such source: '{}'", source),
+            ErdError::SourceRequestError { source, url, desc } => {
+                write!(f, "Error requesting {} from {:?}: {}", url, source, desc)
+            }
+            ErdError::InvalidToken(token) => write!(f, "Token was invalid: '{}'", token),
+            ErdError::IOError(err, desc) => write!(f, "{desc}: {err}"),
+        }
+    }
+}
+
 fn main() {
     let config_str =
         std::fs::read_to_string("test_config.toml").expect("Failed to read test config");
@@ -17,23 +48,29 @@ fn main() {
 
     let cli = Cli::parse();
 
-    match &cli.command {
+    if let Err(e) = handle_cli(cli, config) {
+        eprintln!("{e}");
+        exit(1);
+    }
+}
+
+fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
+    match cli.command {
         Commands::Fetch { artifact } => {
             let mut found = false;
             for source in &config.sources {
                 for art in &source.artifacts {
                     if artifact.is_none() || artifact.as_ref().unwrap() == &art.id {
                         println!("Retrieving {} from {}", art.id, source.id);
-                        get_latest_artifact(art, &source.kind, &source.token);
+                        get_latest_artifact(art, &source.kind, &source.token)?;
                         found = true;
                     }
                 }
             }
             if !found {
-                if let Some(id) = artifact {
-                    eprintln!("No such artifact: '{}'", id);
-                } else {
-                    eprintln!("No artifacts to retrieve");
+                match artifact {
+                    Some(id) => return Err(ErdError::NoSuchArtifact(id.to_string())),
+                    None => eprintln!("No artifacts to retrieve"),
                 }
             }
         }
@@ -41,39 +78,46 @@ fn main() {
             let matched_src = config
                 .sources
                 .iter()
-                .find(|src| &src.id == source)
-                .unwrap_or_else(|| panic!("No source named: {}", source));
-            scan_source(matched_src, group.clone())
+                .find(|src| src.id == source)
+                .ok_or(ErdError::NoSuchSource(source))?;
+            scan_source(matched_src, group.clone())?;
         }
-        Commands::History { artifact } => {
+        Commands::History { artifact, short } => {
             let found = config.sources.iter().find_map(|s| {
                 s.artifacts
                     .iter()
-                    .find(|a| &a.id == artifact)
+                    .find(|a| a.id == artifact)
                     .map(|a| (s, a))
             });
-            match found {
-                Some((src, a)) => get_history(a, &src.kind, &src.token),
-                None => {
-                    eprintln!("No such artifact: {}", artifact)
-                }
-            }
+            let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
+            get_history(a, &src.kind, &src.token, short)?;
         }
-    }
+        Commands::List { source } => {
+            list_artifacts(&config, source.clone())?;
+        }
+    };
+    Ok(())
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Fetch {
-        artifact: Option<String>,
-    },
+    /// Retrieve the given artifact
+    Fetch { artifact: Option<String> },
+    /// Scan for projects to add to configuration
     Scan {
         source: String,
         group: Option<String>,
     },
+    /// View the job history
     History {
+        /// The particular artifact to view
         artifact: String,
+        /// Display in a condensed view
+        #[clap(long)]
+        short: bool,
     },
+    /// List artifacts
+    List { source: Option<String> },
 }
 
 #[derive(Parser, Debug)]
@@ -82,24 +126,57 @@ struct Cli {
     command: Commands,
 }
 
-fn scan_source(source: &SourceConfig, group: Option<String>) {
+fn scan_source(source: &SourceConfig, group: Option<String>) -> Result<(), ErdError> {
     match source.kind {
         SourceType::Gitlab => scan_gitlab(group, &source.token),
     }
 }
 
-fn get_latest_artifact(artifact: &ArtifactConfig, kind: &SourceType, token: &str) {
+fn get_latest_artifact(
+    artifact: &ArtifactConfig,
+    kind: &SourceType,
+    token: &str,
+) -> Result<(), ErdError> {
     match kind {
         SourceType::Gitlab => get_latest_artifact_gitlab(artifact, token),
     }
 }
 
-fn get_history(artifact: &ArtifactConfig, kind: &SourceType, token: &str) {
+fn get_history(
+    artifact: &ArtifactConfig,
+    kind: &SourceType,
+    token: &str,
+    short: bool,
+) -> Result<(), ErdError> {
     match kind {
-        SourceType::Gitlab => get_history_gitlab(artifact, token),
+        SourceType::Gitlab => get_history_gitlab(artifact, token, short),
     }
 }
 
+fn list_artifacts(config: &Config, source: Option<String>) -> Result<(), ErdError> {
+    match source {
+        Some(src) => {
+            let artifact_source = config
+                .sources
+                .iter()
+                .find(|s| s.id == src)
+                .ok_or(ErdError::NoSuchSource(src))?;
+            println!("Artifacts from {}", artifact_source.id);
+            for artifact in &artifact_source.artifacts {
+                println!("- {} ({})", artifact.id, artifact.branch);
+            }
+        }
+        None => {
+            for src in &config.sources {
+                println!("== Artifacts from {} ==", src.id);
+                for artifact in &src.artifacts {
+                    println!("- {} ({})", artifact.id, artifact.branch);
+                }
+            }
+        }
+    }
+    Ok(())
+}
 pub fn extract_file(
     archive: &mut ZipArchive<impl Read + Seek>,
     file: &str,
