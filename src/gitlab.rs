@@ -2,7 +2,10 @@ use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
+use log::{debug, info, warn};
+use reqwest::blocking::Response;
 use reqwest::header::{HeaderName, HeaderValue};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use zip::ZipArchive;
 
@@ -24,9 +27,12 @@ pub struct JobHistory {
     pub stage: String,
     pub created_at: String,
     pub name: String,
+    #[serde(rename = "ref")]
+    pub job_ref: String,
     pub commit: JobCommit,
     pub pipeline: JobPipeline,
     pub artifacts_file: Option<JobArtifactsFile>,
+    pub web_url: String,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +46,11 @@ pub struct JobCommit {
 
 #[derive(Deserialize)]
 pub struct JobPipeline {
+    pub id: usize,
     pub status: String,
+    #[serde(rename = "ref")]
+    pub job_ref: String,
+    pub web_url: String,
 }
 
 #[derive(Deserialize)]
@@ -73,31 +83,16 @@ pub fn scan_gitlab(query: Option<String>, token: &str) -> Result<(), ErdError> {
         ])
         .header(TOKEN_HEADER, token_value)
         .send()
-        .map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.to_string(),
-            desc: format!("Failed to get project list: {}", e),
-        })?;
-    let response_data = response.text().map_err(|e| ErdError::SourceRequestError {
-        source: SourceType::Gitlab,
-        url: url.to_string(),
-        desc: format!("Non-text response from Gitlab: {}", e),
-    })?;
-
-    let projects: Vec<ProjectData> =
-        serde_json::from_str(&response_data).map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.to_string(),
-            desc: format!("Failed to deserialize response from Gitlab: {}", e),
-        })?;
-    println!("Path (ID) - URL");
+        .map_err(|e| request_failed(e, "Failed to get project list"))?;
+    let projects: Vec<ProjectData> = deserialize_response(response)?;
+    info!("Path (ID) - URL");
     let longest_name: usize = projects
         .iter()
         .map(|p| p.path_with_namespace.len())
         .max()
         .unwrap_or(0);
     for project in projects {
-        println!(
+        info!(
             "{:longest_name$} ({}) - {}",
             project.path_with_namespace, project.id, project.web_url
         );
@@ -126,9 +121,9 @@ pub fn get_artifact_gitlab(
     let mut zip_archive = ZipArchive::new(Cursor::new(buffer))
         .map_err(|e| ErdError::IOError(e.into(), "Invalid zip archive".to_string()))?;
     for file_name in zip_archive.file_names() {
-        println!("File name: {}", file_name);
+        debug!("File name: {}", file_name);
         if file_name.ends_with(&artifact.artifact_pattern) {
-            println!("Artifact: {}", file_name);
+            info!("Artifact: {}", file_name);
             found_jar = Option::Some(file_name.to_string());
         }
     }
@@ -136,7 +131,7 @@ pub fn get_artifact_gitlab(
         let path: PathBuf = jar_name.parse().expect("Invalid jar path");
         let file_data = extract_file(&mut zip_archive, &jar_name).expect("Failed to extract JAR");
         let file_name = path.file_name().expect("Path was not a file name!");
-        println!("Writing Artifact: {:?}", file_name);
+        info!("Writing Artifact: {:?}", file_name);
 
         let mut jar_file = File::create(output_dir.join(file_name))
             .map_err(|e| ErdError::IOError(e, "Failed to create Artifact file".to_string()))?;
@@ -156,19 +151,15 @@ fn get_latest_artifact_gitlab(artifact: &ArtifactConfig, token: &str) -> Result<
     let client = reqwest::blocking::Client::new();
     let token_value = get_token_value(token)?;
     let mut response = client
-        .get(&url)
+        .get(url)
         .header(TOKEN_HEADER, token_value)
         .send()
-        .map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.clone(),
-            desc: format!("Failed to get artifact from Gitlab: {}", e),
-        })?;
+        .map_err(|e| request_failed(e, "Failed to get artifact from Gitlab"))?;
     let mut buffer = vec![];
     let bytes_read = response
         .read_to_end(&mut buffer)
         .map_err(|e| ErdError::IOError(e, "Failed to read data from artifact zip".to_string()))?;
-    println!("{} bytes read", bytes_read);
+    debug!("{} bytes read", bytes_read);
     Ok(buffer)
 }
 
@@ -184,19 +175,15 @@ pub fn get_artifact_version_gitlab(
     let client = reqwest::blocking::Client::new();
     let token_value = get_token_value(token)?;
     let mut response = client
-        .get(&url)
+        .get(url)
         .header(TOKEN_HEADER, token_value)
         .send()
-        .map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.clone(),
-            desc: format!("Failed to get artifact from Gitlab: {}", e),
-        })?;
+        .map_err(|e| request_failed(e, "Failed to get artifact Gitlab"))?;
     let mut buffer = vec![];
     let bytes_read = response
         .read_to_end(&mut buffer)
         .map_err(|e| ErdError::IOError(e, "Failed to read data from artifact zip".to_string()))?;
-    println!("{} bytes read", bytes_read);
+    debug!("{} bytes read", bytes_read);
     Ok(buffer)
 }
 
@@ -213,31 +200,17 @@ pub fn get_history_gitlab(
     );
     let job_name = "build";
     let response = client
-        .get(&url)
+        .get(url)
         .query(&[
             ("order_by", "updated_at"),
             ("ref", &artifact.branch),
             ("name", job_name),
-            ("per_page", "5"),
+            ("per_page", "10"),
         ])
         .header(TOKEN_HEADER, token_value)
         .send()
-        .map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.clone(),
-            desc: format!("Failed to get artifact from Gitlab: {}", e),
-        })?;
-    let response_data = response.text().map_err(|e| ErdError::SourceRequestError {
-        source: SourceType::Gitlab,
-        url: url.clone(),
-        desc: format!("Did not receive text from Gitlab: {}", e),
-    })?;
-    let job_history: Vec<JobHistory> =
-        serde_json::from_str(&response_data).map_err(|e| ErdError::SourceRequestError {
-            source: SourceType::Gitlab,
-            url: url.clone(),
-            desc: format!("Failed to deserialize response from Gitlab: {}", e),
-        })?;
+        .map_err(|e| request_failed(e, "Failed to get artifact from Gitlab"))?;
+    let job_history: Vec<JobHistory> = deserialize_response(response)?;
     if short {
         show_history_short(artifact, job_name, job_history);
     } else {
@@ -247,30 +220,38 @@ pub fn get_history_gitlab(
 }
 
 fn show_history_long(artifact: &ArtifactConfig, job_name: &str, job_history: Vec<JobHistory>) {
-    println!(
+    info!(
         "Showing {} jobs for {} on branch {}",
         job_name, artifact.id, artifact.branch
     );
     for job in job_history {
         let has_artifacts = job.artifacts_file.is_some();
-        println!("{} - {}", job.commit.short_id, job.commit.title);
-        println!("\tId: {}", job.id);
-        println!("\tTimestamp: {}", job.created_at);
-        println!(
+        info!(
+            "{} ({}) - {}",
+            job.commit.short_id, job.job_ref, job.commit.title
+        );
+        info!("\tBuild id: {}", job.id);
+        info!("\tTimestamp: {}", job.created_at);
+        info!(
             "\tStatus: {}{}",
             job.status,
-            if !has_artifacts { " (expired)" } else { "" }
+            if !has_artifacts {
+                " (no artifacts)"
+            } else {
+                ""
+            }
         );
-        println!("\tAuthor: {}", job.commit.author_email);
+        info!("\tURL: {}", job.web_url);
+        info!("\tAuthor: {}", job.commit.author_email);
     }
 }
 
 fn show_history_short(artifact: &ArtifactConfig, job_name: &str, job_history: Vec<JobHistory>) {
-    println!(
+    info!(
         "Showing {} jobs for {} on branch {}",
         job_name, artifact.id, artifact.branch
     );
-    println!("Id - When - Commit (Author) - Status");
+    info!("Id - When - Commit (Author) - Status");
     for entry in job_history {
         if entry.name != job_name {
             continue;
@@ -279,7 +260,7 @@ fn show_history_short(artifact: &ArtifactConfig, job_name: &str, job_history: Ve
         if entry.artifacts_file.is_none() {
             job_status += " (expired)";
         }
-        println!(
+        info!(
             "{} - {} - {} ({}) - {}",
             entry.id,
             entry.created_at,
@@ -287,5 +268,94 @@ fn show_history_short(artifact: &ArtifactConfig, job_name: &str, job_history: Ve
             entry.commit.author_email,
             job_status,
         )
+    }
+}
+
+pub fn rebuild_artifact_gitlab(
+    artifact: &ArtifactConfig,
+    token: &str,
+    build_id: String,
+) -> Result<(), ErdError> {
+    let client = reqwest::blocking::Client::new();
+    let token_value = get_token_value(token)?;
+    let create_pipeline_url = format!(
+        "https://gitlab.com/api/v4/projects/{}/pipeline",
+        artifact.project_id,
+    );
+    let create_pipeline_response = client
+        .post(&create_pipeline_url)
+        .header(TOKEN_HEADER, token_value.clone())
+        .query(&[("ref", &build_id)])
+        .send()
+        .map_err(|e| request_failed(e, &format!("Failed to retry job {} on Gitlab", build_id)))?;
+    let new_pipeline: JobPipeline = deserialize_response(create_pipeline_response)?;
+    info!(
+        "Started pipeline {} to rebuild {}",
+        new_pipeline.id, build_id
+    );
+    let list_jobs_url = format!(
+        "https://gitlab.com/api/v4/projects/{}/pipeline",
+        new_pipeline.id
+    );
+    let list_jobs_response = client
+        .get(&list_jobs_url)
+        .header(TOKEN_HEADER, token_value)
+        .send()
+        .map_err(|e| request_failed(e, "Failed to list jobs for created pipeline"))?;
+    let pipeline_jobs: Vec<JobHistory> = deserialize_response(list_jobs_response)?;
+    match pipeline_jobs.first() {
+        Some(job) => {
+            info!(
+                "> {} ({}) - {}",
+                job.commit.short_id, new_pipeline.job_ref, job.commit.title
+            );
+        }
+        None => {
+            warn!("No jobs appear to have been started");
+        }
+    }
+    for job in pipeline_jobs {
+        info!("> Started job {} ({}) - {}", job.name, job.id, job.web_url);
+    }
+    info!("> {}", new_pipeline.job_ref);
+    info!(
+        "> New pipeline {} - {}",
+        new_pipeline.id, new_pipeline.web_url
+    );
+    info!("Check the job history to see when the pipeline is complete and its job id");
+    Ok(())
+}
+
+fn deserialize_response<T: DeserializeOwned>(response: Response) -> Result<T, ErdError> {
+    let url = response.url().to_string();
+    let response_text = response.text().map_err(unexpected_response)?;
+    serde_json::from_str(&response_text).map_err(|e| ErdError::SourceRequestError {
+        source: SourceType::Gitlab,
+        url: url.clone(),
+        desc: format!("Failed to deserialize response from Gitlab: {}", e),
+    })
+}
+
+fn unexpected_response(error: reqwest::Error) -> ErdError {
+    let url = error
+        .url()
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    ErdError::SourceRequestError {
+        source: SourceType::Gitlab,
+        url,
+        desc: format!("Unexpected response from Gitlab: {}", error),
+    }
+}
+
+fn request_failed(error: reqwest::Error, what: &str) -> ErdError {
+    let url = error
+        .url()
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    ErdError::SourceRequestError {
+        source: SourceType::Gitlab,
+        url,
+        desc: format!("{}: {}", what, error),
     }
 }

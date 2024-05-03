@@ -1,5 +1,6 @@
 mod config;
 mod gitlab;
+mod log;
 
 use std::{
     fmt::Display,
@@ -7,9 +8,10 @@ use std::{
     process::exit,
 };
 
+use ::log::{error, info, warn, LevelFilter};
 use clap::{Parser, Subcommand};
 use config::{ArtifactConfig, SourceConfig, SourceType};
-use gitlab::{get_artifact_gitlab, get_history_gitlab, scan_gitlab};
+use gitlab::{get_artifact_gitlab, get_history_gitlab, rebuild_artifact_gitlab, scan_gitlab};
 use zip::ZipArchive;
 
 use crate::config::Config;
@@ -47,9 +49,15 @@ fn main() {
     let config: Config = toml::from_str(&config_str).expect("Invalid config!");
 
     let cli = Cli::parse();
+    let level = if cli.verbose {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    };
+    log::setup(level);
 
     if let Err(e) = handle_cli(cli, config) {
-        eprintln!("{e}");
+        error!("{}", e);
         exit(1);
     }
 }
@@ -74,14 +82,14 @@ fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
                     for source in &config.sources {
                         for art in &source.artifacts {
                             if artifact.is_none() || artifact.as_ref().unwrap() == &art.id {
-                                println!("Retrieving {} from {}", art.id, source.id);
+                                info!("Retrieving {} from {}", art.id, source.id);
                                 get_artifact(art, &source.kind, &source.token, None)?;
                                 found = true;
                             }
                         }
                     }
                     if !found {
-                        eprintln!("No artifacts to retrieve");
+                        warn!("No artifacts to retrieve");
                     }
                 }
             }
@@ -109,6 +117,16 @@ fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
         }
         Commands::List { source } => {
             list_artifacts(&config, source.clone())?;
+        }
+        Commands::Rebuild { artifact, build_id } => {
+            let found = config.sources.iter().find_map(|s| {
+                s.artifacts
+                    .iter()
+                    .find(|a| a.id == artifact)
+                    .map(|a| (s, a))
+            });
+            let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
+            rebuild_artifact(a, &src.kind, &src.token, build_id)?;
         }
     };
     Ok(())
@@ -139,12 +157,20 @@ enum Commands {
     },
     /// List artifacts
     List { source: Option<String> },
+    /// Rebuild an expired artifact
+    /// TODO: This works for branches/tags only on Gitlab.A
+    ///       Perhaps add a way to tag commits and subsequently build
+    Rebuild { artifact: String, build_id: String },
 }
 
 #[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Run with increased output for debugging
+    #[clap(short, long)]
+    verbose: bool,
 }
 
 fn scan_source(source: &SourceConfig, group: Option<String>) -> Result<(), ErdError> {
@@ -183,22 +209,34 @@ fn list_artifacts(config: &Config, source: Option<String>) -> Result<(), ErdErro
                 .iter()
                 .find(|s| s.id == src)
                 .ok_or(ErdError::NoSuchSource(src))?;
-            println!("Artifacts from {}", artifact_source.id);
+            info!("Artifacts from {}", artifact_source.id);
             for artifact in &artifact_source.artifacts {
-                println!("- {} ({})", artifact.id, artifact.branch);
+                info!("- {} ({})", artifact.id, artifact.branch);
             }
         }
         None => {
             for src in &config.sources {
-                println!("== Artifacts from {} ==", src.id);
+                info!("== Artifacts from {} ==", src.id);
                 for artifact in &src.artifacts {
-                    println!("- {} ({})", artifact.id, artifact.branch);
+                    info!("- {} ({})", artifact.id, artifact.branch);
                 }
             }
         }
     }
     Ok(())
 }
+
+fn rebuild_artifact(
+    artifact: &ArtifactConfig,
+    kind: &SourceType,
+    token: &str,
+    build_id: String,
+) -> Result<(), ErdError> {
+    match kind {
+        SourceType::Gitlab => rebuild_artifact_gitlab(artifact, token, build_id),
+    }
+}
+
 pub fn extract_file(
     archive: &mut ZipArchive<impl Read + Seek>,
     file: &str,
