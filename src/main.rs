@@ -2,19 +2,28 @@ mod config;
 mod gitlab;
 mod log;
 
+use std::fs;
+use std::io::{self, Read, Seek, Write};
 use std::{
     fmt::Display,
-    io::{self, Read, Seek},
+    fs::File,
+    path::{Path, PathBuf},
     process::exit,
 };
 
-use ::log::{error, info, warn, LevelFilter};
+use ::log::{debug, error, info, warn, LevelFilter};
 use clap::{Parser, Subcommand};
 use config::{ArtifactConfig, SourceConfig, SourceType};
 use gitlab::{get_artifact_gitlab, get_history_gitlab, rebuild_artifact_gitlab, scan_gitlab};
+use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 use crate::config::Config;
+
+pub struct FileData {
+    file_name: PathBuf,
+    data: Vec<u8>,
+}
 
 #[derive(Debug)]
 pub enum ErdError {
@@ -185,9 +194,40 @@ fn get_artifact(
     token: &str,
     build_id: Option<String>,
 ) -> Result<(), ErdError> {
-    match kind {
-        SourceType::Gitlab => get_artifact_gitlab(artifact, token, build_id),
+    let output_dir = Path::new("temp");
+
+    let file_data = match kind {
+        SourceType::Gitlab => get_artifact_gitlab(artifact, token, build_id)?,
+    };
+
+    match file_data {
+        Some(art) => {
+            let output_file = output_dir.join(&art.file_name);
+            if output_file.exists() {
+                debug!("{:?} already exists, checking if same", &art.file_name);
+                let existing_hash = sha256sum_file(&output_file)
+                    .map_err(|e| ErdError::IOError(e, "Failed to read existing file".into()))?;
+                let new_hash = sha256sum_mem(&art)
+                    .map_err(|e| ErdError::IOError(e, "Failed to calculate new hash".into()))?;
+                if existing_hash == new_hash {
+                    info!("No new artifact for {}", artifact.id);
+                    return Ok(());
+                }
+            }
+            info!("Fetched new Artifact: {:?}", art.file_name);
+
+            let mut jar_file = File::create(output_file)
+                .map_err(|e| ErdError::IOError(e, "Failed to create Artifact file".to_string()))?;
+            jar_file
+                .write_all(&art.data)
+                .map_err(|e| ErdError::IOError(e, "Failed to write Artifact".into()))?;
+        }
+        None => {
+            warn!("No artifact found");
+        }
     }
+
+    Ok(())
 }
 
 fn get_history(
@@ -240,9 +280,27 @@ fn rebuild_artifact(
 pub fn extract_file(
     archive: &mut ZipArchive<impl Read + Seek>,
     file: &str,
-) -> Result<Vec<u8>, io::Error> {
+) -> Result<FileData, io::Error> {
+    let path: PathBuf = file.parse().expect("Invalid filename");
+    let file_name = path.file_name().expect("Could not get filename from path");
+
     let mut jar = archive.by_name(file)?;
     let mut file_buf = vec![];
     jar.read_to_end(&mut file_buf)?;
-    Ok(file_buf)
+    Ok(FileData {
+        file_name: file_name.into(),
+        data: file_buf,
+    })
+}
+
+fn sha256sum_file(path: &Path) -> Result<Vec<u8>, io::Error> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().iter().cloned().collect())
+}
+
+fn sha256sum_mem(data: &FileData) -> Result<Vec<u8>, io::Error> {
+    let hash = Sha256::digest(&data.data);
+    Ok(hash.iter().cloned().collect())
 }

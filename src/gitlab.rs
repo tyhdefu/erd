@@ -1,6 +1,4 @@
-use std::fs::File;
-use std::io::{Cursor, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Cursor, Read};
 
 use log::{debug, info, warn};
 use reqwest::blocking::Response;
@@ -10,7 +8,7 @@ use serde::Deserialize;
 use zip::ZipArchive;
 
 use crate::config::{ArtifactConfig, SourceType};
-use crate::{extract_file, ErdError};
+use crate::{extract_file, ErdError, FileData};
 
 #[derive(Deserialize)]
 pub struct ProjectData {
@@ -104,18 +102,11 @@ pub fn get_artifact_gitlab(
     artifact: &ArtifactConfig,
     token: &str,
     build_id: Option<String>,
-) -> Result<(), ErdError> {
-    let output_dir = Path::new("temp");
-
+) -> Result<Option<FileData>, ErdError> {
     let buffer = match build_id {
         Some(b_id) => get_artifact_version_gitlab(artifact, token, &b_id)?,
         None => get_latest_artifact_gitlab(artifact, token)?,
     };
-
-    let mut file = File::create(output_dir.join("artifacts.zip"))
-        .map_err(|e| ErdError::IOError(e, "Failed to create artifacts.zip file".to_string()))?;
-    file.write_all(&buffer)
-        .map_err(|e| ErdError::IOError(e, "Failed to save artifacts.zip".to_string()))?;
 
     let mut found_jar = Option::None;
     let mut zip_archive = ZipArchive::new(Cursor::new(buffer))
@@ -127,19 +118,14 @@ pub fn get_artifact_gitlab(
             found_jar = Option::Some(file_name.to_string());
         }
     }
-    if let Some(jar_name) = found_jar {
-        let path: PathBuf = jar_name.parse().expect("Invalid jar path");
-        let file_data = extract_file(&mut zip_archive, &jar_name).expect("Failed to extract JAR");
-        let file_name = path.file_name().expect("Path was not a file name!");
-        info!("Writing Artifact: {:?}", file_name);
-
-        let mut jar_file = File::create(output_dir.join(file_name))
-            .map_err(|e| ErdError::IOError(e, "Failed to create Artifact file".to_string()))?;
-        jar_file
-            .write_all(&file_data)
-            .map_err(|e| ErdError::IOError(e, "Failed to write Artifact".into()))?;
+    match found_jar {
+        Some(jar_name) => {
+            let file_data = extract_file(&mut zip_archive, &jar_name)
+                .map_err(|e| ErdError::IOError(e, "Failed to extract artifact from zip".into()))?;
+            Ok(Some(file_data))
+        }
+        None => Ok(None),
     }
-    Ok(())
 }
 
 fn get_latest_artifact_gitlab(artifact: &ArtifactConfig, token: &str) -> Result<Vec<u8>, ErdError> {
