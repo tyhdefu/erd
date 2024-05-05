@@ -8,6 +8,7 @@ use serde::Deserialize;
 use zip::ZipArchive;
 
 use crate::config::{ArtifactConfig, SourceType};
+use crate::output::{FormatOutput, JobHistoryOutput, OutputOptions};
 use crate::{extract_file, ErdError, FileData};
 
 #[derive(Deserialize)]
@@ -206,33 +207,25 @@ pub fn get_history_gitlab(
 }
 
 fn show_history_long(artifact: &ArtifactConfig, job_name: &str, job_history: Vec<JobHistory>) {
+    let options = OutputOptions {
+        color: true,
+        short: false,
+    };
     info!(
         "Showing {} jobs for {} on branch {}",
         job_name, artifact.id, artifact.branch
     );
     for job in job_history {
-        let has_artifacts = job.artifacts_file.is_some();
-        info!(
-            "{} ({}) - {}",
-            job.commit.short_id, job.job_ref, job.commit.title
-        );
-        info!("\tBuild id: {}", job.id);
-        info!("\tTimestamp: {}", job.created_at);
-        info!(
-            "\tStatus: {}{}",
-            job.status,
-            if !has_artifacts {
-                " (no artifacts)"
-            } else {
-                ""
-            }
-        );
-        info!("\tURL: {}", job.web_url);
-        info!("\tAuthor: {}", job.commit.author_email);
+        let job_long = job.format_output(&options);
+        info!("{}", job_long);
     }
 }
 
 fn show_history_short(artifact: &ArtifactConfig, job_name: &str, job_history: Vec<JobHistory>) {
+    let options = OutputOptions {
+        color: true,
+        short: true,
+    };
     info!(
         "Showing {} jobs for {} on branch {}",
         job_name, artifact.id, artifact.branch
@@ -242,18 +235,8 @@ fn show_history_short(artifact: &ArtifactConfig, job_name: &str, job_history: Ve
         if entry.name != job_name {
             continue;
         }
-        let mut job_status = entry.status.clone();
-        if entry.artifacts_file.is_none() {
-            job_status += " (expired)";
-        }
-        info!(
-            "{} - {} - {} ({}) - {}",
-            entry.id,
-            entry.created_at,
-            entry.commit.short_id,
-            entry.commit.author_email,
-            job_status,
-        )
+        let job_short = entry.format_output(&options);
+        info!("{}", job_short);
     }
 }
 

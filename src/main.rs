@@ -1,6 +1,7 @@
 mod config;
 mod gitlab;
 mod log;
+mod output;
 
 use std::fs;
 use std::io::{self, Read, Seek, Write};
