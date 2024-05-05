@@ -8,7 +8,9 @@ use serde::Deserialize;
 use zip::ZipArchive;
 
 use crate::config::{ArtifactConfig, SourceType};
-use crate::output::{FormatOutput, JobHistoryOutput, OutputOptions};
+use crate::output::{
+    FormatOutput, JobHistoryOutput, OutputOptions, ScanProjectsOutput, ScannedProject,
+};
 use crate::{extract_file, ErdError, FileData};
 
 #[derive(Deserialize)]
@@ -84,18 +86,12 @@ pub fn scan_gitlab(query: Option<String>, token: &str) -> Result<(), ErdError> {
         .send()
         .map_err(|e| request_failed(e, "Failed to get project list"))?;
     let projects: Vec<ProjectData> = deserialize_response(response)?;
-    info!("Path (ID) - URL");
-    let longest_name: usize = projects
-        .iter()
-        .map(|p| p.path_with_namespace.len())
-        .max()
-        .unwrap_or(0);
-    for project in projects {
-        info!(
-            "{:longest_name$} ({}) - {}",
-            project.path_with_namespace, project.id, project.web_url
-        );
-    }
+    let options = OutputOptions {
+        color: true,
+        short: false,
+    };
+    let projects_output: ScanProjectsOutput = projects.format_output(&options);
+    info!("{}", projects_output);
     Ok(())
 }
 
@@ -326,5 +322,40 @@ fn request_failed(error: reqwest::Error, what: &str) -> ErdError {
         source: SourceType::Gitlab,
         url,
         desc: format!("{}: {}", what, error),
+    }
+}
+
+impl FormatOutput<ScanProjectsOutput> for Vec<ProjectData> {
+    fn format_output(self, options: &OutputOptions) -> ScanProjectsOutput {
+        let projects = self
+            .into_iter()
+            .map(|p| ScannedProject {
+                path: p.path_with_namespace,
+                id: p.id.to_string(),
+                url: p.web_url,
+            })
+            .collect();
+
+        ScanProjectsOutput {
+            projects,
+            options: options.clone(),
+        }
+    }
+}
+
+impl FormatOutput<JobHistoryOutput> for JobHistory {
+    fn format_output(self, options: &OutputOptions) -> JobHistoryOutput {
+        JobHistoryOutput {
+            id: self.id.to_string(),
+            job_ref: self.job_ref,
+            timestamp: self.created_at,
+            status: self.status,
+            has_artifacts: self.artifacts_file.is_some(),
+            web_url: self.web_url,
+            commit_short_id: self.commit.short_id,
+            commit_title: self.commit.title,
+            commit_author: self.commit.author_email,
+            options: options.clone(),
+        }
     }
 }

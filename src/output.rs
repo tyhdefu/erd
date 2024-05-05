@@ -5,7 +5,6 @@ use log::error;
 use termcolor::{Buffer, Color, ColorSpec, WriteColor};
 
 use crate::config::SourceConfig;
-use crate::gitlab;
 
 /// Describes how output should be formatted
 #[derive(Debug, Clone)]
@@ -29,16 +28,16 @@ const BRANCH_COLOR: Color = COMMIT_HASH_COLOR;
 
 #[derive(Debug)]
 pub struct JobHistoryOutput {
-    id: String,
-    job_ref: String,
-    timestamp: String,
-    status: String,
-    has_artifacts: bool,
-    web_url: String,
-    commit_short_id: String,
-    commit_title: String,
-    commit_author: String,
-    options: OutputOptions,
+    pub id: String,
+    pub job_ref: String,
+    pub timestamp: String,
+    pub status: String,
+    pub has_artifacts: bool,
+    pub web_url: String,
+    pub commit_short_id: String,
+    pub commit_title: String,
+    pub commit_author: String,
+    pub options: OutputOptions,
 }
 
 impl JobHistoryOutput {
@@ -116,23 +115,6 @@ impl Display for JobHistoryOutput {
     }
 }
 
-impl FormatOutput<JobHistoryOutput> for gitlab::JobHistory {
-    fn format_output(self, options: &OutputOptions) -> JobHistoryOutput {
-        JobHistoryOutput {
-            id: self.id.to_string(),
-            job_ref: self.job_ref,
-            timestamp: self.created_at,
-            status: self.status,
-            has_artifacts: self.artifacts_file.is_some(),
-            web_url: self.web_url,
-            commit_short_id: self.commit.short_id,
-            commit_title: self.commit.title,
-            commit_author: self.commit.author_email,
-            options: options.clone(),
-        }
-    }
-}
-
 pub struct ArtifactListOutput<'a> {
     source: &'a SourceConfig,
     options: OutputOptions,
@@ -178,6 +160,53 @@ impl<'a> Display for ArtifactListOutput<'a> {
             fmt::Error
         })?;
 
+        let s = buf_to_str(buf)?;
+        write!(f, "{}", s)
+    }
+}
+
+pub struct ScannedProject {
+    pub path: String,
+    pub id: String,
+    pub url: String,
+}
+
+pub struct ScanProjectsOutput {
+    pub projects: Vec<ScannedProject>,
+    pub options: OutputOptions,
+}
+
+impl ScanProjectsOutput {
+    fn fmt_default(&self, buf: &mut Buffer) -> Result<(), io::Error> {
+        const PATH_COLOR: Color = Color::Green;
+        buf.set_color(ColorSpec::new().set_fg(Some(PATH_COLOR)))?;
+        write!(buf, "Path")?;
+        buf.reset()?;
+        writeln!(buf, " (ID) - URL")?;
+
+        let longest_name: usize = self
+            .projects
+            .iter()
+            .map(|p| p.path.len())
+            .max()
+            .unwrap_or(0);
+        for project in &self.projects {
+            buf.set_color(ColorSpec::new().set_fg(Some(PATH_COLOR)))?;
+            write!(buf, "{:longest_name$}", project.path)?;
+            buf.reset()?;
+            writeln!(buf, " ({}) - {}", project.id, project.url)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for ScanProjectsOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut buf = create_buf(&self.options);
+        self.fmt_default(&mut buf).map_err(|e| {
+            error!("Failed to format ScanProjectsOutput: {}", e);
+            fmt::Error
+        })?;
         let s = buf_to_str(buf)?;
         write!(f, "{}", s)
     }
