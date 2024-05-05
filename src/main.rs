@@ -51,8 +51,8 @@ impl Display for ErdError {
 }
 
 fn main() {
-    let config_str =
-        std::fs::read_to_string("test_config.toml").expect("Failed to read test config");
+    let config_file_path = Path::new("test_config.toml");
+    let config_str = std::fs::read_to_string(config_file_path).expect("Failed to read test config");
     let config: Config = toml::from_str(&config_str).expect("Invalid config!");
 
     let cli = Cli::parse();
@@ -63,7 +63,7 @@ fn main() {
     };
     log::setup(level);
 
-    if let Err(e) = handle_cli(cli, config) {
+    if let Err(e) = handle_cli(cli, config, config_file_path) {
         error!("{}", e);
         exit(1);
     }
@@ -84,7 +84,7 @@ fn print_fetch_answer(
     }
 }
 
-fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
+fn handle_cli(cli: Cli, config: Config, config_file_path: &Path) -> Result<(), ErdError> {
     let options = OutputOptions {
         color: true,
         short: false,
@@ -164,8 +164,43 @@ fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
             let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
             rebuild_artifact(a, &src.kind, &src.token, build_id)?;
         }
+        Commands::Add { source, project_id } => {
+            let mut new_config = config.clone();
+            let source = new_config
+                .sources
+                .iter_mut()
+                .find(|s| s.id == source)
+                .ok_or(ErdError::NoSuchSource(source))?;
+
+            let id = read_with_prompt("Unique ID")?;
+            let branch = read_with_prompt("Branch")?;
+            let artifact_pattern = read_with_prompt("Artifact Pattern (e.g. *.jar)")?;
+            let art = ArtifactConfig {
+                id,
+                project_id,
+                branch,
+                artifact_pattern,
+            };
+            source.artifacts.push(art);
+            let config_str = toml::to_string(&new_config).expect("Should be able to serialize");
+            std::fs::write(config_file_path, config_str)
+                .map_err(|e| ErdError::IOError(e, "Failed to write new config file".into()))?;
+        }
     };
     Ok(())
+}
+
+fn read_with_prompt(prompt: &str) -> Result<String, ErdError> {
+    print!("{}: ", prompt);
+    io::stdout()
+        .flush()
+        .map_err(|e| ErdError::IOError(e, "Failed to flush stdout".into()))?;
+    let mut buffer = String::new();
+    io::stdin()
+        .read_line(&mut buffer)
+        .map_err(|e| ErdError::IOError(e, format!("Failed to read answer to {}", prompt)))?;
+    let buffer = buffer.trim().into();
+    Ok(buffer)
 }
 
 #[derive(Subcommand, Debug)]
@@ -204,7 +239,13 @@ enum Commands {
         /// The version to rebuild
         build_id: String,
     },
-    // TODO: Perhaps a way to tag versions before rebuilding?
+    /// Add a project to configuration
+    Add {
+        /// The source that this is a part of
+        source: String,
+        /// The ID of the project to be added
+        project_id: String,
+    }, // TODO: Perhaps a way to tag versions before rebuilding?
 }
 
 #[derive(Parser, Debug)]

@@ -1,17 +1,17 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Default, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Debug, PartialEq, Clone)]
 pub struct Config {
     pub sources: Vec<SourceConfig>,
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub enum SourceType {
     Gitlab,
 }
 
 /// A location that artifacts can be pulled from
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct SourceConfig {
     /// Human readable id of the account
     pub id: String,
@@ -23,7 +23,7 @@ pub struct SourceConfig {
     pub artifacts: Vec<ArtifactConfig>,
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ArtifactConfig {
     /// The human readable id of this artifact
     pub id: String,
