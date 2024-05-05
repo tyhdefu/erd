@@ -16,6 +16,7 @@ use ::log::{debug, error, info, warn, LevelFilter};
 use clap::{Parser, Subcommand};
 use config::{ArtifactConfig, SourceConfig, SourceType};
 use gitlab::{get_artifact_gitlab, get_history_gitlab, rebuild_artifact_gitlab, scan_gitlab};
+use output::{ArtifactListOutput, FormatOutput, OutputOptions};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
@@ -243,6 +244,10 @@ fn get_history(
 }
 
 fn list_artifacts(config: &Config, source: Option<String>) -> Result<(), ErdError> {
+    let options = OutputOptions {
+        color: true,
+        short: false,
+    };
     match source {
         Some(src) => {
             let artifact_source = config
@@ -250,17 +255,13 @@ fn list_artifacts(config: &Config, source: Option<String>) -> Result<(), ErdErro
                 .iter()
                 .find(|s| s.id == src)
                 .ok_or(ErdError::NoSuchSource(src))?;
-            info!("Artifacts from {}", artifact_source.id);
-            for artifact in &artifact_source.artifacts {
-                info!("- {} ({})", artifact.id, artifact.branch);
-            }
+            let list_output: ArtifactListOutput = artifact_source.format_output(&options);
+            info!("{}", list_output);
         }
         None => {
             for src in &config.sources {
-                info!("== Artifacts from {} ==", src.id);
-                for artifact in &src.artifacts {
-                    info!("- {} ({})", artifact.id, artifact.branch);
-                }
+                let list_output: ArtifactListOutput = src.format_output(&options);
+                info!("{}", list_output);
             }
         }
     }

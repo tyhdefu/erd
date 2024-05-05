@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use log::error;
 use termcolor::{Buffer, Color, ColorSpec, WriteColor};
 
+use crate::config::SourceConfig;
 use crate::gitlab;
 
 /// Describes how output should be formatted
@@ -15,9 +16,16 @@ pub struct OutputOptions {
     pub short: bool,
 }
 
+/// Something can be formatted to the terminal output,
+/// given certain options
 pub trait FormatOutput<T: Display> {
     fn format_output(self, options: &OutputOptions) -> T;
 }
+
+const COMMIT_HASH_COLOR: Color = Color::Yellow;
+const SOURCE_ID_COLOR: Color = Color::Magenta;
+const ARTIFACT_ID_COLOR: Color = Color::Green;
+const BRANCH_COLOR: Color = COMMIT_HASH_COLOR;
 
 #[derive(Debug)]
 pub struct JobHistoryOutput {
@@ -33,7 +41,6 @@ pub struct JobHistoryOutput {
     options: OutputOptions,
 }
 
-const COMMIT_HASH_COLOR: Color = Color::Yellow;
 impl JobHistoryOutput {
     fn get_status_color(&self) -> Color {
         // TODO: Convert status to enum in display
@@ -51,7 +58,7 @@ impl JobHistoryOutput {
         buf.set_color(ColorSpec::new().set_fg(Some(COMMIT_HASH_COLOR)))?;
         write!(buf, "{}", self.commit_short_id)?;
         buf.reset()?;
-        write!(buf, ")")?;
+        write!(buf, ") ")?;
         let color = self.get_status_color();
         buf.set_color(ColorSpec::new().set_fg(Some(color)))?;
         write!(buf, "{}", self.status)?;
@@ -93,7 +100,7 @@ impl JobHistoryOutput {
 
 impl Display for JobHistoryOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buf = Buffer::ansi();
+        let mut buf = create_buf(&self.options);
 
         match self.options.short {
             true => self.fmt_short(&mut buf),
@@ -104,10 +111,7 @@ impl Display for JobHistoryOutput {
             fmt::Error
         })?;
 
-        let s = String::from_utf8(buf.into_inner()).map_err(|e| {
-            error!("Failed to convert buffer to UTF-8 string: {}", e);
-            fmt::Error
-        })?;
+        let s = buf_to_str(buf)?;
         write!(f, "{}", s)
     }
 }
@@ -127,4 +131,69 @@ impl FormatOutput<JobHistoryOutput> for gitlab::JobHistory {
             options: options.clone(),
         }
     }
+}
+
+pub struct ArtifactListOutput<'a> {
+    source: &'a SourceConfig,
+    options: OutputOptions,
+}
+
+impl<'a> FormatOutput<ArtifactListOutput<'a>> for &'a SourceConfig {
+    fn format_output(self, options: &OutputOptions) -> ArtifactListOutput<'a> {
+        ArtifactListOutput {
+            source: self,
+            options: options.clone(),
+        }
+    }
+}
+
+impl<'a> ArtifactListOutput<'a> {
+    fn fmt_default(&self, buf: &mut Buffer) -> Result<(), io::Error> {
+        write!(buf, "== Artifacts from ")?;
+        buf.set_color(ColorSpec::new().set_fg(Some(SOURCE_ID_COLOR)))?;
+        write!(buf, "{}", self.source.id)?;
+        buf.reset()?;
+        writeln!(buf, " ==")?;
+        for artifact in &self.source.artifacts {
+            write!(buf, "- ")?;
+            buf.set_color(ColorSpec::new().set_fg(Some(ARTIFACT_ID_COLOR)))?;
+            write!(buf, "{}", artifact.id)?;
+            buf.reset()?;
+            write!(buf, " (")?;
+            buf.set_color(ColorSpec::new().set_fg(Some(BRANCH_COLOR)))?;
+            write!(buf, "{}", artifact.branch)?;
+            buf.reset()?;
+            writeln!(buf, ")")?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> Display for ArtifactListOutput<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut buf = create_buf(&self.options);
+
+        self.fmt_default(&mut buf).map_err(|e| {
+            error!("Failed to format ArtifactListOutput: {}", e);
+            fmt::Error
+        })?;
+
+        let s = buf_to_str(buf)?;
+        write!(f, "{}", s)
+    }
+}
+
+fn create_buf(options: &OutputOptions) -> Buffer {
+    if options.color {
+        Buffer::ansi()
+    } else {
+        Buffer::no_color()
+    }
+}
+
+fn buf_to_str(buf: Buffer) -> Result<String, fmt::Error> {
+    String::from_utf8(buf.into_inner()).map_err(|e| {
+        error!("Failed to convert buffer to UTF-8 string: {}", e);
+        fmt::Error
+    })
 }
