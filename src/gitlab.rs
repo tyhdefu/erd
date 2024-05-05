@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read};
 
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use reqwest::blocking::Response;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
@@ -109,9 +109,9 @@ pub fn get_artifact_gitlab(
     let mut zip_archive = ZipArchive::new(Cursor::new(buffer))
         .map_err(|e| ErdError::IOError(e.into(), "Invalid zip archive".to_string()))?;
     for file_name in zip_archive.file_names() {
-        debug!("File name: {}", file_name);
+        trace!("File name: {}", file_name);
         if file_name.ends_with(&artifact.artifact_pattern) {
-            info!("Artifact: {}", file_name);
+            debug!("Found Artifact: {}", file_name);
             found_jar = Option::Some(file_name.to_string());
         }
     }

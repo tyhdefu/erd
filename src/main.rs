@@ -5,12 +5,8 @@ mod output;
 
 use std::fs;
 use std::io::{self, Read, Seek, Write};
-use std::{
-    fmt::Display,
-    fs::File,
-    path::{Path, PathBuf},
-    process::exit,
-};
+use std::path::{Path, PathBuf};
+use std::{fmt::Display, fs::File, process::exit};
 
 use ::log::{debug, error, info, warn, LevelFilter};
 use clap::{Parser, Subcommand};
@@ -73,7 +69,27 @@ fn main() {
     }
 }
 
+fn print_fetch_answer(
+    answer: GetArtifactAnswer,
+    artifact_id: &str,
+    padding: usize,
+    options: &OutputOptions,
+) {
+    let error = matches!(&answer, GetArtifactAnswer::NotFound);
+    let answer_output = answer.format_output(options);
+    if error {
+        error!("{:padding$} {}", artifact_id, answer_output);
+    } else {
+        info!("{:padding$} {}", artifact_id, answer_output);
+    }
+}
+
 fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
+    let options = OutputOptions {
+        color: true,
+        short: false,
+    };
+
     match cli.command {
         Commands::Fetch { artifact, build_id } => {
             match artifact {
@@ -84,17 +100,26 @@ fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
                         .iter()
                         .find_map(|s| s.artifacts.iter().find(|a| a.id == art).map(|a| (s, a)))
                         .ok_or(ErdError::NoSuchArtifact(art))?;
-                    get_artifact(artifact, &source.kind, &source.token, build_id)?;
+                    let answer = get_artifact(artifact, &source.kind, &source.token, build_id)?;
+                    print_fetch_answer(answer, &artifact.id, 0, &options);
                 }
                 None => {
                     // Fetch all artifacts
+                    let longest_id = config
+                        .sources
+                        .iter()
+                        .flat_map(|s| &s.artifacts)
+                        .map(|a| a.id.len())
+                        .max()
+                        .unwrap_or(0);
 
                     let mut found = false;
                     for source in &config.sources {
                         for art in &source.artifacts {
                             if artifact.is_none() || artifact.as_ref().unwrap() == &art.id {
-                                info!("Retrieving {} from {}", art.id, source.id);
-                                get_artifact(art, &source.kind, &source.token, None)?;
+                                debug!("Retrieving {} from {}", art.id, source.id);
+                                let answer = get_artifact(art, &source.kind, &source.token, None)?;
+                                print_fetch_answer(answer, &art.id, longest_id, &options);
                                 found = true;
                             }
                         }
@@ -190,46 +215,59 @@ fn scan_source(source: &SourceConfig, group: Option<String>) -> Result<(), ErdEr
     }
 }
 
+pub enum GetArtifactAnswer {
+    /// Failed to find an artifact file within the output of a job
+    NotFound,
+    /// Found a new artifact with the given filename
+    NewArtifact(String),
+    /// Found an artifact, but it was identical to the existing artifact
+    UpToDate(String),
+}
+
 fn get_artifact(
     artifact: &ArtifactConfig,
     kind: &SourceType,
     token: &str,
     build_id: Option<String>,
-) -> Result<(), ErdError> {
+) -> Result<GetArtifactAnswer, ErdError> {
     let output_dir = Path::new("temp");
 
     let file_data = match kind {
         SourceType::Gitlab => get_artifact_gitlab(artifact, token, build_id)?,
     };
 
-    match file_data {
+    fn is_new(output_file: &Path, file_data: &FileData) -> Result<bool, ErdError> {
+        if !output_file.exists() {
+            return Ok(true);
+        }
+        debug!("{:?} already exists, checking if same", file_data.file_name);
+        let existing_hash = sha256sum_file(output_file)
+            .map_err(|e| ErdError::IOError(e, "Failed to read existing file".into()))?;
+        let new_hash = sha256sum_mem(file_data)
+            .map_err(|e| ErdError::IOError(e, "Failed to calculate new hash".into()))?;
+        Ok(existing_hash != new_hash)
+    }
+
+    Ok(match file_data {
         Some(art) => {
+            let filename_string = art.file_name.to_string_lossy().to_string();
+
             let output_file = output_dir.join(&art.file_name);
-            if output_file.exists() {
-                debug!("{:?} already exists, checking if same", &art.file_name);
-                let existing_hash = sha256sum_file(&output_file)
-                    .map_err(|e| ErdError::IOError(e, "Failed to read existing file".into()))?;
-                let new_hash = sha256sum_mem(&art)
-                    .map_err(|e| ErdError::IOError(e, "Failed to calculate new hash".into()))?;
-                if existing_hash == new_hash {
-                    info!("No new artifact for {}", artifact.id);
-                    return Ok(());
-                }
+
+            if !is_new(&output_file, &art)? {
+                return Ok(GetArtifactAnswer::UpToDate(filename_string));
             }
-            info!("Fetched new Artifact: {:?}", art.file_name);
 
             let mut jar_file = File::create(output_file)
                 .map_err(|e| ErdError::IOError(e, "Failed to create Artifact file".to_string()))?;
             jar_file
                 .write_all(&art.data)
                 .map_err(|e| ErdError::IOError(e, "Failed to write Artifact".into()))?;
-        }
-        None => {
-            warn!("No artifact found");
-        }
-    }
 
-    Ok(())
+            GetArtifactAnswer::NewArtifact(filename_string)
+        }
+        None => GetArtifactAnswer::NotFound,
+    })
 }
 
 fn get_history(

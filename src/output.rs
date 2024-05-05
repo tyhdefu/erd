@@ -5,6 +5,7 @@ use log::error;
 use termcolor::{Buffer, Color, ColorSpec, WriteColor};
 
 use crate::config::SourceConfig;
+use crate::GetArtifactAnswer;
 
 /// Describes how output should be formatted
 #[derive(Debug, Clone)]
@@ -209,6 +210,57 @@ impl Display for ScanProjectsOutput {
         })?;
         let s = buf_to_str(buf)?;
         write!(f, "{}", s)
+    }
+}
+
+pub struct GetArtifactAnswerOutput {
+    answer: GetArtifactAnswer,
+    options: OutputOptions,
+}
+
+impl GetArtifactAnswerOutput {
+    fn fmt_default(&self, buf: &mut Buffer) -> Result<(), io::Error> {
+        let color = match self.answer {
+            GetArtifactAnswer::NotFound => Color::Red,
+            GetArtifactAnswer::NewArtifact(_) => Color::Green,
+            GetArtifactAnswer::UpToDate(_) => Color::Yellow,
+        };
+        buf.set_color(ColorSpec::new().set_fg(Some(color)))?;
+        match &self.answer {
+            GetArtifactAnswer::NotFound => write!(buf, "Not Found!")?,
+            GetArtifactAnswer::NewArtifact(file) => {
+                write!(buf, "New ")?;
+                buf.reset()?;
+                write!(buf, "({})", file)?
+            }
+            GetArtifactAnswer::UpToDate(file) => {
+                write!(buf, "Up to date ")?;
+                buf.reset()?;
+                write!(buf, "({})", file)?;
+            }
+        };
+        buf.reset()
+    }
+}
+
+impl Display for GetArtifactAnswerOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut buf = create_buf(&self.options);
+        self.fmt_default(&mut buf).map_err(|e| {
+            error!("Failed to format GetArtifactAnswerOutput: {}", e);
+            fmt::Error
+        })?;
+        let s = buf_to_str(buf)?;
+        write!(f, "{}", s)
+    }
+}
+
+impl FormatOutput<GetArtifactAnswerOutput> for GetArtifactAnswer {
+    fn format_output(self, options: &OutputOptions) -> GetArtifactAnswerOutput {
+        GetArtifactAnswerOutput {
+            answer: self,
+            options: options.clone(),
+        }
     }
 }
 
