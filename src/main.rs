@@ -170,17 +170,18 @@ fn handle_cli(cli: Cli, config: Config) -> Result<(), ErdError> {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Retrieve the given artifact
+    /// Retrieve artifacts
     Fetch {
-        /// The id of the artifact to fetch
+        /// Only fetch the given artifact
         artifact: Option<String>,
-        /// The specific version id of the artifact
+        /// Fetch a specific version rather than the latest
         build_id: Option<String>,
     },
     /// Scan for projects to add to configuration
     Scan {
         /// The source to scan
         source: String,
+        /// Search for a substring
         search: Option<String>,
     },
     /// View the job history
@@ -191,12 +192,19 @@ enum Commands {
         #[clap(long)]
         short: bool,
     },
-    /// List artifacts
-    List { source: Option<String> },
+    /// List fetchable artifacts
+    List {
+        /// Only list artifacts from the given source
+        source: Option<String>,
+    },
     /// Rebuild an expired artifact
-    /// TODO: This works for branches/tags only on Gitlab.A
-    ///       Perhaps add a way to tag commits and subsequently build
-    Rebuild { artifact: String, build_id: String },
+    Rebuild {
+        /// The artifact to rebuild
+        artifact: String,
+        /// The version to rebuild
+        build_id: String,
+    },
+    // TODO: Perhaps a way to tag versions before rebuilding?
 }
 
 #[derive(Parser, Debug)]
