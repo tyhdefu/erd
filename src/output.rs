@@ -272,7 +272,7 @@ fn create_buf(options: &OutputOptions) -> Buffer {
     }
 }
 
-fn buf_to_str(buf: Buffer) -> Result<String, fmt::Error> {
+pub fn buf_to_str(buf: Buffer) -> Result<String, fmt::Error> {
     String::from_utf8(buf.into_inner()).map_err(|e| {
         error!("Failed to convert buffer to UTF-8 string: {}", e);
         fmt::Error

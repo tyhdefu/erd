@@ -32,8 +32,16 @@ pub struct JobHistory {
     pub job_ref: String,
     pub commit: JobCommit,
     pub pipeline: JobPipeline,
-    pub artifacts_file: Option<JobArtifactsFile>,
+    pub artifacts: Vec<JobArtifact>,
     pub web_url: String,
+}
+
+impl JobHistory {
+    fn get_main_artifact(&self) -> Option<&JobArtifact> {
+        self.artifacts
+            .iter()
+            .find(|a| a.file_type == MAIN_ARTIFACT_TYPE)
+    }
 }
 
 #[derive(Deserialize)]
@@ -54,9 +62,13 @@ pub struct JobPipeline {
     pub web_url: String,
 }
 
+const MAIN_ARTIFACT_TYPE: &str = "archive";
 #[derive(Deserialize)]
-pub struct JobArtifactsFile {
-    filename: String,
+pub struct JobArtifact {
+    file_type: String,
+    //size: usize,
+    //filename: String,
+    //file_format: String,
 }
 
 const TOKEN_HEADER: HeaderName = HeaderName::from_static("private-token");
@@ -188,11 +200,12 @@ pub fn get_history_gitlab(
             ("order_by", "updated_at"),
             ("ref", &artifact.branch),
             ("name", job_name),
-            ("per_page", "10"),
+            ("per_page", "6"),
         ])
         .header(TOKEN_HEADER, token_value)
         .send()
         .map_err(|e| request_failed(e, "Failed to get artifact from Gitlab"))?;
+    debug!("URL: {}", response.url());
     let job_history: Vec<JobHistory> = deserialize_response(response)?;
     if short {
         show_history_short(artifact, job_name, job_history);
@@ -345,12 +358,13 @@ impl FormatOutput<ScanProjectsOutput> for Vec<ProjectData> {
 
 impl FormatOutput<JobHistoryOutput> for JobHistory {
     fn format_output(self, options: &OutputOptions) -> JobHistoryOutput {
+        let has_artifacts = self.get_main_artifact().is_some();
         JobHistoryOutput {
             id: self.id.to_string(),
             job_ref: self.job_ref,
             timestamp: self.created_at,
             status: self.status,
-            has_artifacts: self.artifacts_file.is_some(),
+            has_artifacts,
             web_url: self.web_url,
             commit_short_id: self.commit.short_id,
             commit_title: self.commit.title,
