@@ -2,6 +2,7 @@ mod config;
 mod gitlab;
 mod log;
 mod output;
+mod store;
 
 use std::fs;
 use std::io::{self, Read, Seek, Write};
@@ -50,12 +51,33 @@ impl Display for ErdError {
     }
 }
 
-fn main() {
-    let config_file_path = Path::new("test_config.toml");
-    let config_str = std::fs::read_to_string(config_file_path).expect("Failed to read test config");
-    let config: Config = toml::from_str(&config_str).expect("Invalid config!");
+fn get_config_file(specified: &Option<PathBuf>) -> Option<PathBuf> {
+    if specified.is_some() {
+        return specified.clone();
+    }
+    if cfg!(debug_assertions) {
+        return Some("test_config.toml".into());
+    }
+    let mut config_dir = dirs::config_dir()?;
+    config_dir.push("erd.toml");
+    Some(config_dir)
+}
 
+fn get_store_directory(specified: &Option<PathBuf>) -> Option<PathBuf> {
+    if specified.is_some() {
+        return specified.clone();
+    }
+    if cfg!(debug_assertions) {
+        return Some("temp".into());
+    }
+    let mut state_dir = dirs::state_dir()?;
+    state_dir.push("erd");
+    Some(state_dir)
+}
+
+fn main() {
     let cli = Cli::parse();
+
     let level = if cli.verbose {
         LevelFilter::Debug
     } else {
@@ -63,7 +85,30 @@ fn main() {
     };
     log::setup(level);
 
-    if let Err(e) = handle_cli(cli, config, config_file_path) {
+    let config_file_path = match get_config_file(&cli.config) {
+        Some(path) => path,
+        None => {
+            error!("Unable to resolve a config path.");
+            exit(1);
+        }
+    };
+
+    let config_str = match std::fs::read_to_string(&config_file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to read test config: {}", e);
+            exit(1);
+        }
+    };
+    let config: Config = match toml::from_str(&config_str) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Invalid config: {}", e);
+            exit(1);
+        }
+    };
+
+    if let Err(e) = handle_cli(cli, config, &config_file_path) {
         error!("{}", e);
         exit(1);
     }
@@ -256,6 +301,8 @@ struct Cli {
     /// Run with increased output for debugging
     #[clap(short, long)]
     verbose: bool,
+    /// Override the config file used
+    config: Option<PathBuf>,
 }
 
 fn scan_source(source: &SourceConfig, group: Option<String>) -> Result<(), ErdError> {
