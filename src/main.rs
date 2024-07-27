@@ -1,8 +1,8 @@
-mod config;
+mod auth;
 mod gitlab;
 mod log;
 mod output;
-mod store;
+mod state;
 
 use std::fs;
 use std::io::{self, Read, Seek, Write};
@@ -11,13 +11,13 @@ use std::{fmt::Display, fs::File, process::exit};
 
 use ::log::{debug, error, info, warn, LevelFilter};
 use clap::{Parser, Subcommand};
-use config::{ArtifactConfig, SourceConfig, SourceType};
 use gitlab::{get_artifact_gitlab, get_history_gitlab, rebuild_artifact_gitlab, scan_gitlab};
 use output::{ArtifactListOutput, FormatOutput, OutputOptions};
 use sha2::{Digest, Sha256};
+use state::config::{ArtifactConfig, SourceConfig, SourceType};
 use zip::ZipArchive;
 
-use crate::config::Config;
+use crate::state::config::Config;
 
 pub struct FileData {
     file_name: PathBuf,
