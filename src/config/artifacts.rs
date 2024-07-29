@@ -1,4 +1,8 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
+
+pub const ARTIFACTS_FILE: &'static str = "artifacts.toml";
 
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq, Clone)]
 pub struct Config {
@@ -10,16 +14,27 @@ pub enum SourceType {
     Gitlab,
 }
 
+impl FromStr for SourceType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "gitlab" => Ok(SourceType::Gitlab),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A location that artifacts can be pulled from
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct SourceConfig {
     /// Human readable id of the account
     pub id: String,
-    /// Wht kind of account it is.
+    /// What kind of account it is.
     pub kind: SourceType,
-    /// The secret token / password used to authenticate
-    pub token: String,
-    /// Al artifacts that can be obtained from this source
+    /// The main URL of the source.
+    pub url: String,
+    /// All artifacts that can be obtained from this source
     pub artifacts: Vec<ArtifactConfig>,
 }
 
@@ -47,7 +62,7 @@ mod test {
     [[sources]]
     name = "gitlab/tyhdefu"
     kind = "Gitlab"
-    token = "SuperSecretPass123"
+    url = "https://gitlab.com"
 
     [[sources.artifacts]]
     name = "Project1"
@@ -64,7 +79,7 @@ mod test {
             sources: vec![SourceConfig {
                 id: "gitlab/tyhdefu".into(),
                 kind: SourceType::Gitlab,
-                token: "SuperSecretPass123".into(),
+                url: "https://gitlab.com".into(),
                 artifacts: vec![ArtifactConfig {
                     id: "Project1".into(),
                     project_id: "project-1".into(),

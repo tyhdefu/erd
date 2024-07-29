@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use log::error;
 use termcolor::{Buffer, Color, ColorSpec, WriteColor};
 
-use crate::config::SourceConfig;
-use crate::GetArtifactAnswer;
+use crate::config::artifacts::SourceConfig;
+use crate::commands::fetch::GetArtifactAnswer;
 
 /// Describes how output should be formatted
 #[derive(Debug, Clone)]

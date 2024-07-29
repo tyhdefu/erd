@@ -1,23 +1,26 @@
-mod config;
 mod gitlab;
 mod log;
+mod input;
 mod output;
-mod store;
+mod config;
+mod auth;
+mod commands;
 
 use std::fs;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
-use std::{fmt::Display, fs::File, process::exit};
+use std::{fmt::Display, process::exit};
 
-use ::log::{debug, error, info, warn, LevelFilter};
+use auth::Login;
+use input::read_with_prompt;
+use ::log::{error, info, LevelFilter};
 use clap::{Parser, Subcommand};
-use config::{ArtifactConfig, SourceConfig, SourceType};
-use gitlab::{get_artifact_gitlab, get_history_gitlab, rebuild_artifact_gitlab, scan_gitlab};
+use gitlab::{get_history_gitlab, rebuild_artifact_gitlab, scan_gitlab};
 use output::{ArtifactListOutput, FormatOutput, OutputOptions};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
-use crate::config::Config;
+use config::artifacts::{Config, ArtifactConfig, SourceConfig, SourceType};
 
 pub struct FileData {
     file_name: PathBuf,
@@ -34,7 +37,13 @@ pub enum ErdError {
         desc: String,
     },
     InvalidToken(String),
+    /// No login exists for the given artifact
+    NoLogin {
+        source_url: String,
+    },
     IOError(io::Error, String),
+    /// Failed to deserialize config
+    Deserialize(toml::de::Error, String)
 }
 
 impl Display for ErdError {
@@ -47,32 +56,28 @@ impl Display for ErdError {
             }
             ErdError::InvalidToken(token) => write!(f, "Token was invalid: '{}'", token),
             ErdError::IOError(err, desc) => write!(f, "{desc}: {err}"),
+            ErdError::NoLogin { source_url } => write!(f, "Missing login for {}", source_url),
+            ErdError::Deserialize(e, desc) => write!(f, "Failed to deserialize: {}. {}", desc, e),
         }
     }
 }
 
-fn get_config_file(specified: &Option<PathBuf>) -> Option<PathBuf> {
-    if specified.is_some() {
-        return specified.clone();
-    }
-    if cfg!(debug_assertions) {
-        return Some("test_config.toml".into());
-    }
-    let mut config_dir = dirs::config_dir()?;
-    config_dir.push("erd.toml");
-    Some(config_dir)
+fn get_artifact_config_file(specified: &Option<PathBuf>) -> PathBuf {
+    specified.clone().unwrap_or_else(|| {
+        let mut path = config::get_local_dir();
+        path.push(config::artifacts::ARTIFACTS_FILE);
+        path
+    })
 }
 
-fn get_store_directory(specified: &Option<PathBuf>) -> Option<PathBuf> {
-    if specified.is_some() {
-        return specified.clone();
+fn get_store_directory(specified: &Option<PathBuf>) -> PathBuf {
+    if let Some(s) = specified {
+        return s.clone();
     }
     if cfg!(debug_assertions) {
-        return Some("temp".into());
+        return "temp".into();
     }
-    let mut state_dir = dirs::state_dir()?;
-    state_dir.push("erd");
-    Some(state_dir)
+    return config::get_local_dir();
 }
 
 fn main() {
@@ -84,96 +89,52 @@ fn main() {
         LevelFilter::Info
     };
     log::setup(level);
-
-    let config_file_path = match get_config_file(&cli.config) {
-        Some(path) => path,
-        None => {
-            error!("Unable to resolve a config path.");
-            exit(1);
-        }
-    };
-
-    let config_str = match std::fs::read_to_string(&config_file_path) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to read test config: {}", e);
-            exit(1);
-        }
-    };
-    let config: Config = match toml::from_str(&config_str) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Invalid config: {}", e);
-            exit(1);
-        }
-    };
-
-    if let Err(e) = handle_cli(cli, config, &config_file_path) {
-        error!("{}", e);
-        exit(1);
-    }
-}
-
-fn print_fetch_answer(
-    answer: GetArtifactAnswer,
-    artifact_id: &str,
-    padding: usize,
-    options: &OutputOptions,
-) {
-    let error = matches!(&answer, GetArtifactAnswer::NotFound);
-    let answer_output = answer.format_output(options);
-    if error {
-        error!("{:padding$} {}", artifact_id, answer_output);
-    } else {
-        info!("{:padding$} {}", artifact_id, answer_output);
-    }
-}
-
-fn handle_cli(cli: Cli, config: Config, config_file_path: &Path) -> Result<(), ErdError> {
     let options = OutputOptions {
         color: true,
         short: false,
     };
 
     match cli.command {
-        Commands::Fetch { artifact, build_id } => {
-            match artifact {
-                Some(art) => {
-                    // Fetch specific artifact
-                    let (source, artifact) = config
-                        .sources
-                        .iter()
-                        .find_map(|s| s.artifacts.iter().find(|a| a.id == art).map(|a| (s, a)))
-                        .ok_or(ErdError::NoSuchArtifact(art))?;
-                    let answer = get_artifact(artifact, &source.kind, &source.token, build_id)?;
-                    print_fetch_answer(answer, &artifact.id, 0, &options);
-                }
-                None => {
-                    // Fetch all artifacts
-                    let longest_id = config
-                        .sources
-                        .iter()
-                        .flat_map(|s| &s.artifacts)
-                        .map(|a| a.id.len())
-                        .max()
-                        .unwrap_or(0);
+        Commands::Init { silent } => {
+            commands::init::init_erd(!silent).unwrap();
+            return;
+        }
+        _ => {},
+    }
 
-                    let mut found = false;
-                    for source in &config.sources {
-                        for art in &source.artifacts {
-                            if artifact.is_none() || artifact.as_ref().unwrap() == &art.id {
-                                debug!("Retrieving {} from {}", art.id, source.id);
-                                let answer = get_artifact(art, &source.kind, &source.token, None)?;
-                                print_fetch_answer(answer, &art.id, longest_id, &options);
-                                found = true;
-                            }
-                        }
-                    }
-                    if !found {
-                        warn!("No artifacts to retrieve");
-                    }
-                }
-            }
+
+    let config_file_path = get_artifact_config_file(&cli.config);
+
+    let config_str = match std::fs::read_to_string(&config_file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to read {:?}: {}", config_file_path, e);
+            exit(1);
+        }
+    };
+    let config: Config = match toml::from_str(&config_str) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Invalid artifact config: {}", e);
+            exit(1);
+        }
+    };
+
+    if let Err(e) = handle_cli(cli, config, &config_file_path, options) {
+        error!("{}", e);
+        exit(1);
+    }
+}
+
+fn handle_cli(cli: Cli, config: Config, config_file_path: &Path, options: OutputOptions) -> Result<(), ErdError> {
+    let auth_file = auth::get_auth_file().expect("Failed to find suitable local config path");
+
+    match cli.command {
+        // TODO: split into multiple but hide from clap - clap(flatten)
+        Commands::Init { .. } => panic!("Init should have already been handled!"),
+        Commands::Fetch { artifact, build_id } => {
+            let logins = auth::read_auth_file(&auth_file)?;
+            return commands::fetch::fetch(&config, &logins, artifact, build_id, &options)
         }
         Commands::Scan {
             source,
@@ -184,7 +145,10 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path) -> Result<(), E
                 .iter()
                 .find(|src| src.id == source)
                 .ok_or(ErdError::NoSuchSource(source))?;
-            scan_source(matched_src, group.clone())?;
+            let logins = auth::read_auth_file(&auth_file)?;
+            let login = logins.find_login(&matched_src.url)
+                .ok_or_else(|| ErdError::NoLogin { source_url: matched_src.url.clone() })?;
+            scan_source(matched_src, group.clone(), login)?;
         }
         Commands::History { artifact, short } => {
             let found = config.sources.iter().find_map(|s| {
@@ -194,7 +158,10 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path) -> Result<(), E
                     .map(|a| (s, a))
             });
             let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
-            get_history(a, &src.kind, &src.token, short)?;
+            let logins = auth::read_auth_file(&auth_file)?;
+            let login = logins.find_login(&src.url)
+                .ok_or_else(|| ErdError::NoLogin { source_url: src.url.clone() })?;
+            commands::history::get_history(a, &src.kind, login, short)?;
         }
         Commands::List { source } => {
             list_artifacts(&config, source.clone())?;
@@ -207,7 +174,10 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path) -> Result<(), E
                     .map(|a| (s, a))
             });
             let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
-            rebuild_artifact(a, &src.kind, &src.token, build_id)?;
+            let logins = auth::read_auth_file(&auth_file)?;
+            let login = logins.find_login(&src.url)
+                .ok_or_else(|| ErdError::NoLogin { source_url: src.url.clone() })?;
+            rebuild_artifact(a, &src.kind, &login.password, build_id)?;
         }
         Commands::Add { source, project_id } => {
             let mut new_config = config.clone();
@@ -235,21 +205,15 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path) -> Result<(), E
     Ok(())
 }
 
-fn read_with_prompt(prompt: &str) -> Result<String, ErdError> {
-    print!("{}: ", prompt);
-    io::stdout()
-        .flush()
-        .map_err(|e| ErdError::IOError(e, "Failed to flush stdout".into()))?;
-    let mut buffer = String::new();
-    io::stdin()
-        .read_line(&mut buffer)
-        .map_err(|e| ErdError::IOError(e, format!("Failed to read answer to {}", prompt)))?;
-    let buffer = buffer.trim().into();
-    Ok(buffer)
-}
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Initalise erd in the current directory
+    Init {
+        /// Whether to just create files and skip interactive setup
+        #[clap(short, long)]
+        silent: bool,
+    },
     /// Retrieve artifacts
     Fetch {
         /// Only fetch the given artifact
@@ -305,75 +269,9 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
-fn scan_source(source: &SourceConfig, group: Option<String>) -> Result<(), ErdError> {
+fn scan_source(source: &SourceConfig, group: Option<String>, login: &Login) -> Result<(), ErdError> {
     match source.kind {
-        SourceType::Gitlab => scan_gitlab(group, &source.token),
-    }
-}
-
-pub enum GetArtifactAnswer {
-    /// Failed to find an artifact file within the output of a job
-    NotFound,
-    /// Found a new artifact with the given filename
-    NewArtifact(String),
-    /// Found an artifact, but it was identical to the existing artifact
-    UpToDate(String),
-}
-
-fn get_artifact(
-    artifact: &ArtifactConfig,
-    kind: &SourceType,
-    token: &str,
-    build_id: Option<String>,
-) -> Result<GetArtifactAnswer, ErdError> {
-    let output_dir = Path::new("temp");
-
-    let file_data = match kind {
-        SourceType::Gitlab => get_artifact_gitlab(artifact, token, build_id)?,
-    };
-
-    fn is_new(output_file: &Path, file_data: &FileData) -> Result<bool, ErdError> {
-        if !output_file.exists() {
-            return Ok(true);
-        }
-        debug!("{:?} already exists, checking if same", file_data.file_name);
-        let existing_hash = sha256sum_file(output_file)
-            .map_err(|e| ErdError::IOError(e, "Failed to read existing file".into()))?;
-        let new_hash = sha256sum_mem(file_data)
-            .map_err(|e| ErdError::IOError(e, "Failed to calculate new hash".into()))?;
-        Ok(existing_hash != new_hash)
-    }
-
-    Ok(match file_data {
-        Some(art) => {
-            let filename_string = art.file_name.to_string_lossy().to_string();
-
-            let output_file = output_dir.join(&art.file_name);
-
-            if !is_new(&output_file, &art)? {
-                return Ok(GetArtifactAnswer::UpToDate(filename_string));
-            }
-
-            let mut jar_file = File::create(output_file)
-                .map_err(|e| ErdError::IOError(e, "Failed to create Artifact file".to_string()))?;
-            jar_file
-                .write_all(&art.data)
-                .map_err(|e| ErdError::IOError(e, "Failed to write Artifact".into()))?;
-
-            GetArtifactAnswer::NewArtifact(filename_string)
-        }
-        None => GetArtifactAnswer::NotFound,
-    })
-}
-
-fn get_history(
-    artifact: &ArtifactConfig,
-    kind: &SourceType,
-    token: &str,
-    short: bool,
-) -> Result<(), ErdError> {
-    match kind {
-        SourceType::Gitlab => get_history_gitlab(artifact, token, short),
+        SourceType::Gitlab => scan_gitlab(group, &login.password),
     }
 }
 
@@ -440,3 +338,4 @@ fn sha256sum_mem(data: &FileData) -> Result<Vec<u8>, io::Error> {
     let hash = Sha256::digest(&data.data);
     Ok(hash.iter().cloned().collect())
 }
+

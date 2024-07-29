@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use zip::ZipArchive;
 
-use crate::config::{ArtifactConfig, SourceType};
+use crate::config::artifacts::{ArtifactConfig, SourceType};
 use crate::output::{
     FormatOutput, JobHistoryOutput, OutputOptions, ScanProjectsOutput, ScannedProject,
 };
