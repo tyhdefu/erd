@@ -3,7 +3,7 @@ mod log;
 mod input;
 mod output;
 mod config;
-mod auth;
+mod logins;
 mod commands;
 
 use std::fs;
@@ -11,7 +11,8 @@ use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::{fmt::Display, process::exit};
 
-use auth::Login;
+use commands::auth;
+use logins::Login;
 use input::read_with_prompt;
 use ::log::{error, info, LevelFilter};
 use clap::{Parser, Subcommand};
@@ -43,7 +44,9 @@ pub enum ErdError {
     },
     IOError(io::Error, String),
     /// Failed to deserialize config
-    Deserialize(toml::de::Error, String)
+    Deserialize(toml::de::Error, String),
+    /// Failed to serialize config
+    Serialize(toml::ser::Error, String)
 }
 
 impl Display for ErdError {
@@ -58,6 +61,7 @@ impl Display for ErdError {
             ErdError::IOError(err, desc) => write!(f, "{desc}: {err}"),
             ErdError::NoLogin { source_url } => write!(f, "Missing login for {}", source_url),
             ErdError::Deserialize(e, desc) => write!(f, "Failed to deserialize: {}. {}", desc, e),
+            ErdError::Serialize(e, desc) => write!(f, "Failed to Serialize: {}. {}", desc, e),
         }
     }
 }
@@ -127,13 +131,13 @@ fn main() {
 }
 
 fn handle_cli(cli: Cli, config: Config, config_file_path: &Path, options: OutputOptions) -> Result<(), ErdError> {
-    let auth_file = auth::get_auth_file().expect("Failed to find suitable local config path");
+    let auth_file = logins::get_auth_file().expect("Failed to find suitable local config path");
 
     match cli.command {
         // TODO: split into multiple but hide from clap - clap(flatten)
         Commands::Init { .. } => panic!("Init should have already been handled!"),
         Commands::Fetch { artifact, build_id } => {
-            let logins = auth::read_auth_file(&auth_file)?;
+            let logins = logins::read_logins_file(&auth_file)?;
             return commands::fetch::fetch(&config, &logins, artifact, build_id, &options)
         }
         Commands::Scan {
@@ -145,10 +149,19 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path, options: Output
                 .iter()
                 .find(|src| src.id == source)
                 .ok_or(ErdError::NoSuchSource(source))?;
-            let logins = auth::read_auth_file(&auth_file)?;
-            let login = logins.find_login(&matched_src.url)
-                .ok_or_else(|| ErdError::NoLogin { source_url: matched_src.url.clone() })?;
+            let logins = logins::read_logins_file(&auth_file)?;
+            let login = logins.find_login(&matched_src.url);
             scan_source(matched_src, group.clone(), login)?;
+        }
+        Commands::Auth { source_or_url } => {
+            let logins = logins::read_logins_file(&auth_file)?;
+            let url = config.sources.iter().find(|s| s.id == source_or_url)
+                .map(|s| s.url.to_owned())
+                .unwrap_or(source_or_url);
+
+            let new_logins = auth::auth(url, logins)?;
+            logins::save_logins_file(&auth_file, &new_logins)?;
+            info!("New login saved.")
         }
         Commands::History { artifact, short } => {
             let found = config.sources.iter().find_map(|s| {
@@ -158,7 +171,7 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path, options: Output
                     .map(|a| (s, a))
             });
             let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
-            let logins = auth::read_auth_file(&auth_file)?;
+            let logins = logins::read_logins_file(&auth_file)?;
             let login = logins.find_login(&src.url)
                 .ok_or_else(|| ErdError::NoLogin { source_url: src.url.clone() })?;
             commands::history::get_history(a, &src.kind, login, short)?;
@@ -174,7 +187,7 @@ fn handle_cli(cli: Cli, config: Config, config_file_path: &Path, options: Output
                     .map(|a| (s, a))
             });
             let (src, a) = found.ok_or(ErdError::NoSuchArtifact(artifact))?;
-            let logins = auth::read_auth_file(&auth_file)?;
+            let logins = logins::read_logins_file(&auth_file)?;
             let login = logins.find_login(&src.url)
                 .ok_or_else(|| ErdError::NoLogin { source_url: src.url.clone() })?;
             rebuild_artifact(a, &src.kind, &login.password, build_id)?;
@@ -228,6 +241,10 @@ enum Commands {
         /// Search for a substring
         search: Option<String>,
     },
+    Auth {
+        /// The source or URL to authenticate for.
+        source_or_url: String,
+    },
     /// View the job history
     History {
         /// The particular artifact to view
@@ -269,9 +286,9 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
-fn scan_source(source: &SourceConfig, group: Option<String>, login: &Login) -> Result<(), ErdError> {
+fn scan_source(source: &SourceConfig, group: Option<String>, login: Option<&Login>) -> Result<(), ErdError> {
     match source.kind {
-        SourceType::Gitlab => scan_gitlab(group, &login.password),
+        SourceType::Gitlab => scan_gitlab(group, login.map(|l| &*l.password)),
     }
 }
 

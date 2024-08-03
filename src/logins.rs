@@ -15,7 +15,11 @@ pub fn get_auth_file() -> Option<PathBuf> {
     Some(config_dir)
 }
 
-pub fn read_auth_file(file: &Path) -> Result<Logins, ErdError> {
+pub fn read_logins_file(file: &Path) -> Result<Logins, ErdError> {
+    if !file.exists() {
+        debug!("No logins file found - continuing without authentication");
+        return Ok(Logins::default());
+    }
     let s = std::fs::read_to_string(file)
         .map_err(|e| ErdError::IOError(e, format!("Failed to read {:?}", file)))?;
     let logins: Logins = toml::from_str(&s)
@@ -23,8 +27,15 @@ pub fn read_auth_file(file: &Path) -> Result<Logins, ErdError> {
     Ok(logins)
 }
 
+pub fn save_logins_file(file: &Path, logins: &Logins) -> Result<(), ErdError> {
+    let data = toml::to_string(logins)
+        .map_err(|e| ErdError::Serialize(e, format!("{:?}", file)))?;
+    std::fs::write(file, data)
+        .map_err(|e| ErdError::IOError(e, format!("Failed to save {:?}", file)))
+}
+
 #[derive(Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Logins {
     logins: Vec<Login>,
 }
@@ -43,6 +54,18 @@ impl Logins {
         }
         debug!("Best match: {:?}", best_match);
         return best_match;
+    }
+
+    /// Add the given login.
+    /// If a login with the given URL already exists, it is replaced.
+    pub fn set_login(&mut self, login: Login) -> Option<Login> {
+        for l in self.logins.iter_mut() {
+            if l.url == login.url {
+                return Some(std::mem::replace(l, login));
+            }
+        }
+        self.logins.push(login);
+        return None;
     }
 }
 

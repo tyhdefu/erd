@@ -1,8 +1,6 @@
 use log::{Level, LevelFilter};
-use std::io::Write;
+use std::io::{self, Write};
 use termcolor::{Buffer, Color, ColorSpec, WriteColor};
-
-use crate::output;
 
 pub fn setup(max_level: LevelFilter) {
     let logger = Box::new(ErdLogger {
@@ -44,19 +42,29 @@ impl log::Log for ErdLogger {
 }
 
 fn print_error(colored: bool, record: &log::Record) {
-    let mut buf = if colored {
-        Buffer::ansi()
-    } else {
-        Buffer::no_color()
-    };
-    let mut color = ColorSpec::new();
-    color.set_fg(Some(Color::Red));
-    if buf.set_color(&color).is_err() || write!(buf, "{}", record.args()).is_err() {
+    if !colored {
         eprintln!("{}", record.args());
         return;
     }
-    match output::buf_to_str(buf) {
+    match create_error_string(record) {
         Ok(s) => eprintln!("{}", s),
-        Err(_) => eprintln!("{}", record.args()),
+        Err(e) => {
+            eprintln!("{}", record.args());
+            eprintln!("Failed to write colored output: {}", e);
+        }
     }
+}
+
+fn create_error_string(record: &log::Record) -> Result<String, io::Error> {
+    let mut buf = Buffer::ansi();
+
+    let mut color = ColorSpec::new();
+    color.set_fg(Some(Color::Red));
+
+    buf.set_color(&color)?;
+    write!(buf, "{}", record.args())?;
+    buf.reset()?;
+
+    String::from_utf8(buf.into_inner()).map_err(|_| 
+            io::Error::new(io::ErrorKind::InvalidData, "Couldn't convert to UTF-8".to_owned()))
 }

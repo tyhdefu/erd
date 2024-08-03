@@ -1,4 +1,4 @@
-use crate::{auth::Login, gitlab::get_history_gitlab, ErdError};
+use crate::{logins::Login, gitlab::get_history_gitlab, ErdError};
 
 use crate::config::artifacts::{ArtifactConfig, SourceType};
 

@@ -3,10 +3,15 @@ use std::fs::create_dir;
 use crate::{config, ErdError};
 use crate::config::artifacts::{Config, SourceConfig, SourceType, ARTIFACTS_FILE};
 use crate::input::read_with_prompt;
+use log::error;
 use toml;
 
 pub fn init_erd(interactive: bool) -> Result<(), ErdError> {
     let erd_dir = config::get_local_dir();
+    if erd_dir.exists() {
+        error!("erd already initialised in this directory!");
+        return Ok(());
+    }
     create_dir(&erd_dir)
         .map_err(|e| ErdError::IOError(e, format!("Failed to create {:?} directory", erd_dir)))?;
 

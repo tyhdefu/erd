@@ -79,13 +79,13 @@ fn get_token_value(token: &str) -> Result<HeaderValue, ErdError> {
         .map_err(|_| ErdError::InvalidToken(token.to_string()))
 }
 
-pub fn scan_gitlab(query: Option<String>, token: &str) -> Result<(), ErdError> {
+pub fn scan_gitlab(query: Option<String>, token: Option<&str>) -> Result<(), ErdError> {
     let client = reqwest::blocking::Client::new();
-    let token_value: HeaderValue = get_token_value(token)?;
+    let token_value: Option<HeaderValue> = token.map(get_token_value).transpose()?;
     // https://docs.gitlab.com/ee/api/projects.html#list-all-projects
     // TODO: filter by owned, group, etc.
     let url = "https://gitlab.com/api/v4/projects";
-    let response = client
+    let mut request = client
         .get(url)
         .query(&[
             ("membership", "true"),
@@ -93,10 +93,18 @@ pub fn scan_gitlab(query: Option<String>, token: &str) -> Result<(), ErdError> {
             ("per_page", "30"),
             ("search", query.as_deref().unwrap_or("")),
             ("search_namespaces", "true"),
-        ])
-        .header(TOKEN_HEADER, token_value)
-        .send()
+        ]);
+    if let Some(h_value) = token_value {
+        request = request.header(TOKEN_HEADER, h_value);
+    }
+    else {
+        warn!("Scanning without login - you might not get any results.");
+    }
+    let response = request.send()
         .map_err(|e| request_failed(e, "Failed to get project list"))?;
+    let response = response.error_for_status()
+        .map_err(|e| request_failed(e, "Received Error while getting project list"))?;
+    debug!("Got HTTP Code {}", response.status());
     let projects: Vec<ProjectData> = deserialize_response(response)?;
     let options = OutputOptions {
         color: true,

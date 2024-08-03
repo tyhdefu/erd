@@ -4,9 +4,9 @@ use std::path::Path;
 
 use log::{debug, info, warn, error};
 
-use crate::auth::Logins;
+use crate::logins::Logins;
 use crate::gitlab::get_artifact_gitlab;
-use crate::output::{OutputOptions, FormatOutput};
+use crate::output::{self, FormatOutput, OutputOptions};
 use crate::{config, sha256sum_file, sha256sum_mem, ErdError, FileData};
 use crate::config::artifacts::{ArtifactConfig, Config, SourceType};
 
@@ -85,6 +85,9 @@ fn get_artifact(
 ) -> Result<GetArtifactAnswer, ErdError> {
     let mut output_dir = config::get_local_dir();
     output_dir.push("downloads");
+
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| ErdError::IOError(e, "Failed to create output dir".to_string()))?;
 
     let file_data = match kind {
         SourceType::Gitlab => get_artifact_gitlab(artifact, token, build_id)?,
